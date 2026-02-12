@@ -110,6 +110,105 @@ The deployment creates the following objects in `MIGRATION_PLANNING.ANALYTICS`:
               └─────────────────────────────┘
 ```
 
+## How Metrics Are Generated
+
+The `MODEL_USAGE_METRICS` table is the foundation of this solution. It combines data from three Snowflake ACCOUNT_USAGE views to build a comprehensive picture of each object's usage, performance, and dependencies.
+
+### Data Sources
+
+| Source View | What It Provides | Key Fields Used |
+|-------------|------------------|-----------------|
+| `SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY` | Object-level access patterns | `BASE_OBJECTS_ACCESSED`, `USER_NAME`, `QUERY_ID`, `QUERY_START_TIME` |
+| `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` | Query performance metrics | `TOTAL_ELAPSED_TIME`, `BYTES_SCANNED`, `ROWS_PRODUCED`, `EXECUTION_STATUS` |
+| `SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES` | Downstream object relationships | `REFERENCED_*`, `REFERENCING_*` columns |
+
+### Metric Definitions
+
+| Metric | Calculation | Description |
+|--------|-------------|-------------|
+| `total_queries_90d` | `COUNT(DISTINCT QUERY_ID)` | Number of unique queries that accessed this object in the last 90 days |
+| `distinct_users_90d` | `COUNT(DISTINCT USER_NAME)` | Number of unique users who queried this object |
+| `users_list` | `LISTAGG(DISTINCT USER_NAME)` | Comma-separated list of users for reference |
+| `last_used_at` | `MAX(QUERY_START_TIME)` | Timestamp of most recent access |
+| `days_since_last_use` | `DATEDIFF('day', last_used_at, CURRENT_TIMESTAMP())` | Staleness indicator |
+| `avg_execution_time_ms` | `AVG(TOTAL_ELAPSED_TIME)` | Average query duration in milliseconds |
+| `p95_execution_time_ms` | `PERCENTILE_CONT(0.95)` | 95th percentile execution time (outlier-resistant) |
+| `avg_bytes_scanned` | `AVG(BYTES_SCANNED)` | Average data read per query |
+| `avg_rows_returned` | `AVG(ROWS_PRODUCED)` | Average result set size |
+| `error_rate` | `SUM(failures) / COUNT(*)` | Fraction of queries that failed (0.0 - 1.0) |
+| `downstream_object_count` | `COUNT(DISTINCT REFERENCING_OBJECT_NAME)` | Number of views/tables that depend on this object |
+| `downstream_view_count` | `COUNT(DISTINCT ... WHERE DOMAIN='VIEW')` | Subset: dependent views only |
+| `downstream_table_count` | `COUNT(DISTINCT ... WHERE DOMAIN='TABLE')` | Subset: dependent tables only |
+| `downstream_objects_list` | `LISTAGG(DISTINCT REFERENCING_OBJECT_NAME)` | Comma-separated list of dependents |
+| `criticality_score` | See formula below | Composite priority score |
+
+### Query Processing Pipeline
+
+```
+Step 1: Extract Object Access (object_access CTE)
+├── Flatten BASE_OBJECTS_ACCESSED array from ACCESS_HISTORY
+├── Parse fully-qualified names into database/schema/object
+├── Filter to Tables, Views, Materialized Views only
+└── Exclude system users (SYSTEM, SNOWFLAKE, *_SERVICE, SYS_*)
+
+Step 2: Aggregate Query Metrics (query_metrics CTE)
+├── Join to QUERY_HISTORY on QUERY_ID
+├── Calculate COUNT, AVG, PERCENTILE aggregations
+└── Group by database_name, schema_name, object_name, object_type
+
+Step 3: Aggregate Dependencies (dependency_metrics CTE)
+├── Query OBJECT_DEPENDENCIES for referenced objects
+├── Count distinct downstream objects by type
+└── Group by database_name, schema_name, object_name
+
+Step 4: Join and Score (final SELECT)
+├── LEFT JOIN query_metrics to dependency_metrics
+├── Use UPPER() for case-insensitive matching
+├── Calculate criticality_score
+└── Filter to objects with total_queries_90d > 0
+```
+
+### Filters Applied
+
+The following records are **excluded** from analysis:
+
+| Filter | Reason |
+|--------|--------|
+| `USER_NAME IN ('SYSTEM', 'SNOWFLAKE')` | Internal Snowflake processes |
+| `USER_NAME LIKE '%_SERVICE'` | Service accounts (often automated) |
+| `USER_NAME LIKE 'SYS_%'` | System-generated users |
+| `object_type NOT IN ('Table', 'View', 'Materialized View')` | Focus on data objects only |
+| `total_queries_90d = 0` | Objects with no recent usage |
+
+### Customizing the Metrics Query
+
+You can modify `sql/01_model_usage_metrics.sql` to:
+
+**Include only specific databases:**
+```sql
+-- In object_access CTE, add:
+AND SPLIT_PART(obj.value:objectName::STRING, '.', 1) IN ('PROD_DB', 'ANALYTICS_DB')
+```
+
+**Exclude staging/temp schemas:**
+```sql
+-- In object_access CTE, add:
+AND SPLIT_PART(obj.value:objectName::STRING, '.', 2) NOT IN ('STAGING', 'TEMP', 'RAW')
+```
+
+**Change the lookback window:**
+```sql
+-- Change from 90 days to 180 days:
+WHERE ah.QUERY_START_TIME >= DATEADD('day', -180, CURRENT_TIMESTAMP())
+```
+
+**Include service accounts:**
+```sql
+-- Remove these lines from object_access CTE:
+AND ah.USER_NAME NOT LIKE '%_SERVICE'
+AND ah.USER_NAME NOT LIKE 'SYS_%'
+```
+
 ## Wave Assignment Logic
 
 Models are assigned to migration waves based on usage and complexity:
