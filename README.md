@@ -297,7 +297,7 @@ The Cortex Agent enables conversational interaction via Snowflake Intelligence.
 ```json
 {
   "models": {
-    "orchestration": "claude-4-sonnet"
+    "orchestration": "auto"
   },
   "instructions": {
     "orchestration": "You are a migration planning assistant. Use the migration_data tool to answer questions about model usage, dependencies, migration waves, and prioritization.",

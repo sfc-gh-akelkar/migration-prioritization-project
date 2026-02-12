@@ -377,7 +377,7 @@ CREATE OR REPLACE AGENT SNOWFLAKE_INTELLIGENCE.AGENTS.MIGRATION_PLANNING_AGENT
   FROM SPECIFICATION $
   {
     "models": {
-      "orchestration": "claude-4-sonnet"
+      "orchestration": "auto"
     },
     "instructions": {
       "orchestration": "You are a migration planning assistant. Use the migration_data tool to answer questions about model usage, dependencies, migration waves, and prioritization. When users ask about which models to migrate first, focus on Wave 1 models. For risk assessment, highlight models with high downstream dependencies.",
