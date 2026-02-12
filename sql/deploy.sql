@@ -61,9 +61,9 @@ SELECT '[PASS] Database MIGRATION_PLANNING.ANALYTICS created' AS status;
 -- STEP 2: CREATE MODEL USAGE METRICS VIEW
 -- =============================================================================
 
-SELECT '[STEP 2/4] Creating MODEL_USAGE_METRICS view...' AS status;
+SELECT '[STEP 2/4] Creating MODEL_USAGE_METRICS table...' AS status;
 
-CREATE OR REPLACE VIEW MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS AS
+CREATE OR REPLACE TABLE MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS AS
 
 WITH object_access AS (
     SELECT
@@ -162,7 +162,7 @@ WHERE q.total_queries_90d > 0;
 
 -- Validate Step 2
 SELECT 
-    '[PASS] MODEL_USAGE_METRICS view created with ' || COUNT(*) || ' models' AS status
+    '[PASS] MODEL_USAGE_METRICS table created with ' || COUNT(*) || ' models' AS status
 FROM MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS;
 
 
@@ -357,7 +357,7 @@ SELECT 'Database', 'MIGRATION_PLANNING'
 UNION ALL
 SELECT 'Schema', 'ANALYTICS'
 UNION ALL
-SELECT 'Objects Created', '4 (2 views, 1 table, 1 semantic view)'
+SELECT 'Objects Created', '4 (1 view, 2 tables, 1 semantic view)'
 UNION ALL
 SELECT 'Total Models Analyzed', (SELECT COUNT(*)::STRING FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN)
 UNION ALL

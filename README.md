@@ -66,7 +66,7 @@ The deployment creates the following objects in `MIGRATION_PLANNING.ANALYTICS`:
 
 | Object | Type | Description |
 |--------|------|-------------|
-| `MODEL_USAGE_METRICS` | View | Real-time usage metrics from ACCOUNT_USAGE |
+| `MODEL_USAGE_METRICS` | Table | Snapshot of usage metrics from ACCOUNT_USAGE |
 | `MIGRATION_SCORING` | View | AI-classified impact and risk levels |
 | `MIGRATION_PLAN` | Table | Materialized plan with AI rationales |
 | `MIGRATION_PLANNING_SEM` | Semantic View | Natural language query interface |
@@ -307,7 +307,7 @@ migration-prioritization-project/
 ├── README.md                           # This file
 └── sql/
     ├── deploy.sql                      # Master deployment script
-    ├── 01_model_usage_metrics_view.sql # Step 1: Usage metrics view
+    ├── 01_model_usage_metrics.sql      # Step 1: Usage metrics table
     ├── 02_cortex_migration_recommendations.sql  # Step 2-3: AI scoring
     ├── 03_semantic_view.sql            # Step 4: Semantic view
     └── 03_sample_queries.sql           # Example analysis queries

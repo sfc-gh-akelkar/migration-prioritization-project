@@ -1,9 +1,10 @@
 -- =============================================================================
--- MODEL USAGE METRICS VIEW
+-- MODEL USAGE METRICS TABLE
 -- Aggregates usage patterns and dependencies for migration prioritization
 -- =============================================================================
 
-CREATE OR REPLACE VIEW {{database}}.{{schema}}.MODEL_USAGE_METRICS AS
+CREATE OR REPLACE TABLE MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS AS
+
 WITH object_access AS (
     SELECT
         obj.value:objectDomain::STRING AS object_type,
@@ -18,7 +19,6 @@ WITH object_access AS (
     WHERE ah.QUERY_START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
       AND obj.value:objectDomain::STRING IN ('Table', 'View', 'Materialized View')
       AND ah.USER_NAME NOT IN ('SYSTEM', 'SNOWFLAKE')
-      AND ah.USER_NAME NOT LIKE 'STPLAT%'
       AND ah.USER_NAME NOT LIKE '%_SERVICE'
       AND ah.USER_NAME NOT LIKE 'SYS_%'
 ),
@@ -37,11 +37,15 @@ query_metrics AS (
         ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY qh.TOTAL_ELAPSED_TIME), 2) AS p95_execution_time_ms,
         ROUND(AVG(qh.BYTES_SCANNED), 0) AS avg_bytes_scanned,
         ROUND(AVG(qh.ROWS_PRODUCED), 0) AS avg_rows_returned,
-        ROUND(SUM(CASE WHEN qh.EXECUTION_STATUS != 'SUCCESS' THEN 1 ELSE 0 END)::FLOAT / NULLIF(COUNT(*), 0), 4) AS error_rate
+        ROUND(
+            SUM(CASE WHEN qh.EXECUTION_STATUS != 'SUCCESS' THEN 1 ELSE 0 END)::FLOAT 
+            / NULLIF(COUNT(*), 0), 
+        4) AS error_rate
     FROM object_access oa
     LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY qh
         ON oa.QUERY_ID = qh.QUERY_ID
-    WHERE oa.object_name IS NOT NULL AND oa.object_name != ''
+    WHERE oa.object_name IS NOT NULL 
+      AND oa.object_name != ''
     GROUP BY 1, 2, 3, 4
 ),
 
@@ -51,9 +55,14 @@ dependency_metrics AS (
         REFERENCED_SCHEMA AS schema_name,
         REFERENCED_OBJECT_NAME AS object_name,
         COUNT(DISTINCT REFERENCING_OBJECT_NAME) AS downstream_object_count,
-        COUNT(DISTINCT CASE WHEN REFERENCING_OBJECT_DOMAIN = 'VIEW' THEN REFERENCING_OBJECT_NAME END) AS downstream_view_count,
-        COUNT(DISTINCT CASE WHEN REFERENCING_OBJECT_DOMAIN = 'TABLE' THEN REFERENCING_OBJECT_NAME END) AS downstream_table_count,
-        LISTAGG(DISTINCT REFERENCING_OBJECT_NAME, ', ') WITHIN GROUP (ORDER BY REFERENCING_OBJECT_NAME) AS downstream_objects_list
+        COUNT(DISTINCT CASE 
+            WHEN REFERENCING_OBJECT_DOMAIN = 'VIEW' THEN REFERENCING_OBJECT_NAME 
+        END) AS downstream_view_count,
+        COUNT(DISTINCT CASE 
+            WHEN REFERENCING_OBJECT_DOMAIN = 'TABLE' THEN REFERENCING_OBJECT_NAME 
+        END) AS downstream_table_count,
+        LISTAGG(DISTINCT REFERENCING_OBJECT_NAME, ', ') 
+            WITHIN GROUP (ORDER BY REFERENCING_OBJECT_NAME) AS downstream_objects_list
     FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
     WHERE REFERENCED_OBJECT_NAME IS NOT NULL
     GROUP BY 1, 2, 3
@@ -72,15 +81,19 @@ SELECT
     q.avg_execution_time_ms,
     q.p95_execution_time_ms,
     q.avg_bytes_scanned,
+    q.avg_rows_returned,
     q.error_rate,
     COALESCE(d.downstream_object_count, 0) AS downstream_object_count,
     COALESCE(d.downstream_view_count, 0) AS downstream_view_count,
+    COALESCE(d.downstream_table_count, 0) AS downstream_table_count,
     d.downstream_objects_list,
     ROUND(
-        (q.total_queries_90d * 0.5) +
-        (q.distinct_users_90d * 20) +
-        (COALESCE(d.downstream_object_count, 0) * 25),
-    2) AS criticality_score
+        (q.total_queries_90d * 0.4) +
+        (q.distinct_users_90d * 15) +
+        (COALESCE(d.downstream_object_count, 0) * 20) +
+        (CASE WHEN q.error_rate > 0.05 THEN 10 ELSE 0 END),
+    2) AS criticality_score,
+    CURRENT_TIMESTAMP() AS refreshed_at
 FROM query_metrics q
 LEFT JOIN dependency_metrics d
     ON UPPER(q.database_name) = UPPER(d.database_name)
