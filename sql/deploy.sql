@@ -193,24 +193,24 @@ SELECT
     m.days_since_last_use,
     m.criticality_score,
     
-    -- AI_CLASSIFY for impact bucketing
-    AI_CLASSIFY(
+    -- AI_CLASSIFY for impact bucketing (returns {"labels":["X"]} format)
+    PARSE_JSON(AI_CLASSIFY(
         'Model: ' || m.model_name || 
         ' | Queries (90d): ' || m.total_queries_90d || 
         ' | Users: ' || m.distinct_users_90d || 
         ' | Downstream deps: ' || m.downstream_object_count,
         ARRAY_CONSTRUCT('HIGH', 'MEDIUM', 'LOW')
-    ):label::STRING AS impact_level,
+    )::STRING):labels[0]::STRING AS impact_level,
     
     -- AI_CLASSIFY for risk bucketing
-    AI_CLASSIFY(
+    PARSE_JSON(AI_CLASSIFY(
         'Model: ' || m.model_name || 
         ' | Downstream objects: ' || m.downstream_object_count || 
         ' | Avg exec time ms: ' || COALESCE(m.avg_execution_time_ms, 0) || 
         ' | Error rate: ' || COALESCE(m.error_rate, 0) ||
         ' | Days since last use: ' || m.days_since_last_use,
         ARRAY_CONSTRUCT('HIGH', 'MEDIUM', 'LOW')
-    ):label::STRING AS risk_level,
+    )::STRING):labels[0]::STRING AS risk_level,
     
     -- Rules-based migration wave
     CASE
