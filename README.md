@@ -1,19 +1,288 @@
 # Migration Prioritization with Snowflake Cortex
 
-Automatically prioritize data models for migration using Snowflake's ACCOUNT_USAGE views and Cortex AI functions. This solution analyzes query history, user impact, and object dependencies to generate a prioritized migration plan with AI-powered rationales.
+A technical solution for automatically prioritizing data models for migration using Snowflake's observability views and Cortex AI functions.
 
-## Overview
+---
 
-This solution implements a 4-step pattern for migration planning:
+## Table of Contents
 
-1. **Model Usage Layer** - Aggregates 90-day usage metrics from ACCOUNT_USAGE views
-2. **AI Scoring** - Uses AISQL functions (AI_CLASSIFY, AI_COMPLETE) to classify impact/risk and generate rationales
-3. **Semantic View** - Enables natural language queries via Cortex Analyst
-4. **Migration Plan** - Materialized table with wave assignments and AI-generated recommendations
+1. [Technical Solution Overview](#1-technical-solution-overview)
+2. [Design Details](#2-design-details)
+3. [Deployment Guide](#3-deployment-guide)
+4. [Known Limitations](#4-known-limitations)
 
-## Prerequisites
+---
 
-### Snowflake Requirements
+## 1. Technical Solution Overview
+
+### Problem Statement
+
+Organizations migrating data platforms need to prioritize which models (tables, views) to migrate first. Manual prioritization is time-consuming and error-prone. This solution automates prioritization by analyzing actual usage patterns, user impact, and downstream dependencies.
+
+### Solution Approach
+
+The solution follows a 4-step pattern that leverages Snowflake's built-in observability and AI capabilities:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              DATA SOURCES                                    │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
+│  │ ACCESS_HISTORY  │  │ QUERY_HISTORY   │  │ OBJECT_DEPENDENCIES         │  │
+│  │ Who queried     │  │ How it performed│  │ What depends on it          │  │
+│  │ what, when      │  │ (time, bytes)   │  │ (downstream objects)        │  │
+│  └────────┬────────┘  └────────┬────────┘  └──────────────┬──────────────┘  │
+└───────────┼─────────────────────┼─────────────────────────┼─────────────────┘
+            │                     │                         │
+            └─────────────────────┼─────────────────────────┘
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: MODEL_USAGE_METRICS (Table)                                        │
+│  ─────────────────────────────────────                                      │
+│  Aggregates 90-day usage into per-object metrics:                           │
+│  • Query frequency, distinct users, last access                             │
+│  • Performance (avg/p95 execution time, bytes scanned)                      │
+│  • Dependencies (downstream object counts)                                  │
+│  • Criticality score (composite ranking)                                    │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 2: MIGRATION_SCORING (View)                                           │
+│  ────────────────────────────────                                           │
+│  Applies AI classification and rules-based wave assignment:                 │
+│  • AI_CLASSIFY → Impact level (HIGH/MEDIUM/LOW)                             │
+│  • AI_CLASSIFY → Risk level (HIGH/MEDIUM/LOW)                               │
+│  • Rules → Migration wave (Wave 1/2/3/DEPRECATE)                            │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 3: MIGRATION_PLAN (Table)                                             │
+│  ──────────────────────────────                                             │
+│  Materializes scores with AI-generated rationales:                          │
+│  • AI_COMPLETE → Human-readable migration rationale per model               │
+│  • Point-in-time snapshot for reporting and export                          │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 4: MIGRATION_PLANNING_SEM (Semantic View)                             │
+│  ──────────────────────────────────────────────                             │
+│  Enables natural language queries via Cortex Analyst:                       │
+│  • "Show me Wave 1 models"                                                  │
+│  • "Which models have the most dependencies?"                               │
+│  • "What's the average criticality by database?"                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **AISQL over Cortex Agents** | Batch scoring workloads benefit from AISQL's row-by-row processing; Agents are better for interactive exploration |
+| **Table over View for metrics** | Snapshot semantics; avoids repeated expensive ACCOUNT_USAGE queries |
+| **Rules-based wave assignment** | Deterministic, auditable; AI adds rationale, not the classification itself |
+| **90-day lookback window** | Balances recency vs. sample size; configurable |
+
+### Objects Created
+
+| Object | Type | Purpose |
+|--------|------|---------|
+| `MODEL_USAGE_METRICS` | Table | Foundation metrics from ACCOUNT_USAGE |
+| `MIGRATION_SCORING` | View | Real-time AI classification layer |
+| `MIGRATION_PLAN` | Table | Materialized plan with AI rationales |
+| `MIGRATION_PLANNING_SEM` | Semantic View | Natural language query interface |
+
+---
+
+## 2. Design Details
+
+### 2.1 MODEL_USAGE_METRICS: The Foundation Layer
+
+This table is the lynchpin of the solution. It combines three ACCOUNT_USAGE views into a single, queryable metrics layer.
+
+#### Data Sources
+
+| Source View | What It Provides | Key Fields |
+|-------------|------------------|------------|
+| `ACCESS_HISTORY` | Object-level access patterns | `BASE_OBJECTS_ACCESSED`, `USER_NAME`, `QUERY_ID` |
+| `QUERY_HISTORY` | Query performance metrics | `TOTAL_ELAPSED_TIME`, `BYTES_SCANNED`, `EXECUTION_STATUS` |
+| `OBJECT_DEPENDENCIES` | Downstream relationships | `REFERENCING_OBJECT_NAME`, `REFERENCING_OBJECT_DOMAIN` |
+
+#### Query Processing Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CTE 1: object_access                                                       │
+│  ────────────────────                                                       │
+│  • FLATTEN(BASE_OBJECTS_ACCESSED) to get per-object access records          │
+│  • SPLIT_PART to parse DATABASE.SCHEMA.OBJECT names                         │
+│  • Filter: Tables, Views, Materialized Views only                           │
+│  • Filter: Exclude system users (SYSTEM, SNOWFLAKE, *_SERVICE, SYS_*)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CTE 2: query_metrics                                                       │
+│  ────────────────────                                                       │
+│  • JOIN to QUERY_HISTORY on QUERY_ID                                        │
+│  • Aggregate: COUNT(queries), COUNT(users), MAX(last_used)                  │
+│  • Aggregate: AVG/P95 execution time, AVG bytes scanned                     │
+│  • Calculate: error_rate = failed_queries / total_queries                   │
+│  • GROUP BY: database_name, schema_name, object_name, object_type           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CTE 3: dependency_metrics                                                  │
+│  ─────────────────────────                                                  │
+│  • Query OBJECT_DEPENDENCIES for each referenced object                     │
+│  • COUNT DISTINCT downstream objects (total, views, tables)                 │
+│  • LISTAGG downstream object names for reference                            │
+│  • GROUP BY: database_name, schema_name, object_name                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Final SELECT                                                               │
+│  ────────────                                                               │
+│  • LEFT JOIN query_metrics to dependency_metrics (case-insensitive)         │
+│  • Calculate criticality_score                                              │
+│  • Filter: total_queries_90d > 0 (exclude never-queried objects)            │
+│  • Add: refreshed_at timestamp                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Metric Definitions
+
+| Metric | Formula | Description |
+|--------|---------|-------------|
+| `total_queries_90d` | `COUNT(DISTINCT QUERY_ID)` | Unique queries accessing this object |
+| `distinct_users_90d` | `COUNT(DISTINCT USER_NAME)` | Unique users querying this object |
+| `last_used_at` | `MAX(QUERY_START_TIME)` | Most recent access timestamp |
+| `days_since_last_use` | `DATEDIFF(day, last_used_at, NOW())` | Staleness indicator |
+| `avg_execution_time_ms` | `AVG(TOTAL_ELAPSED_TIME)` | Mean query duration |
+| `p95_execution_time_ms` | `PERCENTILE_CONT(0.95)` | 95th percentile duration |
+| `avg_bytes_scanned` | `AVG(BYTES_SCANNED)` | Mean data read per query |
+| `error_rate` | `SUM(failures) / COUNT(*)` | Query failure ratio (0.0-1.0) |
+| `downstream_object_count` | `COUNT(DISTINCT dependents)` | Objects that reference this one |
+| `criticality_score` | See below | Composite priority ranking |
+
+#### Criticality Score Formula
+
+```sql
+criticality_score = 
+    (total_queries_90d × 0.4) +           -- Usage frequency
+    (distinct_users_90d × 15) +           -- User breadth
+    (downstream_object_count × 20) +      -- Blast radius
+    (CASE WHEN error_rate > 0.05 THEN 10 ELSE 0 END)  -- Stability flag
+```
+
+**Weight rationale:**
+- **0.4 per query**: High-frequency objects are business-critical
+- **15 per user**: Multi-user objects have broader organizational impact
+- **20 per dependency**: Downstream objects multiply migration risk
+- **+10 error penalty**: Unstable objects may need priority attention
+
+### 2.2 MIGRATION_SCORING: AI Classification Layer
+
+This view applies Snowflake's AISQL functions to classify each model's impact and risk.
+
+#### AI_CLASSIFY for Impact Level
+
+```sql
+AI_CLASSIFY(
+    'Model: ' || model_name || 
+    ' | Queries: ' || total_queries_90d || 
+    ' | Users: ' || distinct_users_90d || 
+    ' | Dependencies: ' || downstream_object_count,
+    ARRAY_CONSTRUCT('HIGH', 'MEDIUM', 'LOW')
+):label::STRING AS impact_level
+```
+
+#### AI_CLASSIFY for Risk Level
+
+```sql
+AI_CLASSIFY(
+    'Model: ' || model_name || 
+    ' | Dependencies: ' || downstream_object_count || 
+    ' | Avg exec time: ' || avg_execution_time_ms || 
+    ' | Error rate: ' || error_rate ||
+    ' | Days since use: ' || days_since_last_use,
+    ARRAY_CONSTRUCT('HIGH', 'MEDIUM', 'LOW')
+):label::STRING AS risk_level
+```
+
+#### Rules-Based Wave Assignment
+
+```sql
+CASE
+    WHEN days_since_last_use > 90 THEN 'DEPRECATE'
+    WHEN total_queries_90d > 100 AND downstream_object_count <= 3 THEN 'Wave 1'
+    WHEN total_queries_90d > 100 AND downstream_object_count > 3 THEN 'Wave 2'
+    WHEN total_queries_90d > 20 THEN 'Wave 2'
+    ELSE 'Wave 3'
+END AS migration_wave
+```
+
+| Wave | Criteria | Strategy |
+|------|----------|----------|
+| **Wave 1** | >100 queries AND ≤3 dependencies | High usage, low risk → migrate first |
+| **Wave 2** | >100 queries AND >3 deps, OR >20 queries | Requires coordination |
+| **Wave 3** | ≤20 queries | Low priority |
+| **DEPRECATE** | >90 days since last use | Candidate for retirement |
+
+### 2.3 MIGRATION_PLAN: Materialized Output
+
+This table materializes the scoring view and adds AI-generated rationales.
+
+#### AI_COMPLETE for Rationales
+
+```sql
+AI_COMPLETE(
+    'claude-3-5-sonnet',
+    'You are a data migration consultant. Provide a concise 1-2 sentence 
+     rationale for this migration classification.
+     
+     Model: ' || model_name || '
+     Metrics: Queries=' || total_queries_90d || ', Users=' || distinct_users_90d ||
+     ', Dependencies=' || downstream_object_count || '
+     Classification: Impact=' || impact_level || ', Risk=' || risk_level || 
+     ', Wave=' || migration_wave
+') AS migration_rationale
+```
+
+### 2.4 MIGRATION_PLANNING_SEM: Semantic View
+
+Enables natural language queries via Cortex Analyst.
+
+#### Dimensions (Filterable Attributes)
+
+| Dimension | Source Column | Synonyms |
+|-----------|---------------|----------|
+| `database_name` | `database_name` | db, database |
+| `schema_name` | `schema_name` | schema |
+| `model_name` | `model_name` | model, table, view, object |
+| `impact_level` | `impact_level` | impact, importance |
+| `risk_level` | `risk_level` | risk, complexity |
+| `migration_wave` | `migration_wave` | wave, phase, priority |
+
+#### Metrics (Aggregatable Measures)
+
+| Metric | Aggregation | Synonyms |
+|--------|-------------|----------|
+| `query_count` | `SUM(total_queries_90d)` | queries, usage |
+| `model_count` | `COUNT(model_name)` | models, count |
+| `dependency_count` | `SUM(downstream_object_count)` | dependencies |
+| `avg_criticality` | `AVG(criticality_score)` | criticality, score |
+
+---
+
+## 3. Deployment Guide
+
+### 3.1 Prerequisites
+
+#### Snowflake Requirements
 
 | Requirement | Details |
 |-------------|---------|
@@ -21,482 +290,258 @@ This solution implements a 4-step pattern for migration planning:
 | **Role** | ACCOUNTADMIN or custom role with privileges below |
 | **Cortex Access** | SNOWFLAKE.CORTEX_USER database role |
 
-### Required Privileges
+#### Required Privileges
 
 ```sql
--- Grant access to ACCOUNT_USAGE views
+-- Access to ACCOUNT_USAGE views
 GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE <your_role>;
 
--- Grant Cortex AI functions access
+-- Cortex AI functions
 GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE <your_role>;
 
--- Grant object creation privileges
+-- Object creation (choose one)
 GRANT CREATE DATABASE ON ACCOUNT TO ROLE <your_role>;
--- OR if using existing database:
+-- OR for existing database:
 GRANT CREATE SCHEMA ON DATABASE <your_database> TO ROLE <your_role>;
 ```
 
-### Tools
+### 3.2 Deployment Steps
 
-- [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index) (recommended) or Snowsight
-
-## Quick Start
-
-### Option 1: Deploy with Snowflake CLI
+#### Option 1: Snowflake CLI (Recommended)
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/sfc-gh-akelkar/migration-prioritization-project.git
 cd migration-prioritization-project
 
-# Deploy (takes 5-15 minutes depending on model count)
+# Deploy (5-15 minutes depending on model count)
 snow sql -f sql/deploy.sql
 ```
 
-### Option 2: Deploy via Snowsight
+#### Option 2: Snowsight
 
-1. Open Snowsight and navigate to **Worksheets**
-2. Create a new worksheet
-3. Copy the contents of `sql/deploy.sql` into the worksheet
-4. Run all statements
+1. Open Snowsight → **Worksheets**
+2. Create a new SQL worksheet
+3. Copy contents of `sql/deploy.sql`
+4. Execute all statements
 
-## What Gets Created
-
-The deployment creates the following objects in `MIGRATION_PLANNING.ANALYTICS`:
-
-| Object | Type | Description |
-|--------|------|-------------|
-| `MODEL_USAGE_METRICS` | Table | Snapshot of usage metrics from ACCOUNT_USAGE |
-| `MIGRATION_SCORING` | View | AI-classified impact and risk levels |
-| `MIGRATION_PLAN` | Table | Materialized plan with AI rationales |
-| `MIGRATION_PLANNING_SEM` | Semantic View | Natural language query interface |
-
-## Architecture
+### 3.3 Deployment Output
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     SNOWFLAKE.ACCOUNT_USAGE                         │
-├──────────────────┬──────────────────┬───────────────────────────────┤
-│  ACCESS_HISTORY  │  QUERY_HISTORY   │  OBJECT_DEPENDENCIES          │
-│  (object access) │  (performance)   │  (downstream deps)            │
-└────────┬─────────┴────────┬─────────┴───────────────┬───────────────┘
-         │                  │                         │
-         └──────────────────┼─────────────────────────┘
-                            ▼
-              ┌─────────────────────────────┐
-              │    MODEL_USAGE_METRICS      │
-              │    (aggregated view)        │
-              └─────────────┬───────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────────┐
-              │    MIGRATION_SCORING        │
-              │  AI_CLASSIFY: impact/risk   │
-              │  Rules: wave assignment     │
-              └─────────────┬───────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────────┐
-              │      MIGRATION_PLAN         │
-              │  AI_COMPLETE: rationales    │
-              │  (materialized table)       │
-              └─────────────┬───────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────────┐
-              │   MIGRATION_PLANNING_SEM    │
-              │     (semantic view)         │
-              │  "Show me Wave 1 models"    │
-              └─────────────────────────────┘
+[STEP 1/4] Creating database and schema...
+[PASS] Database MIGRATION_PLANNING.ANALYTICS created
+
+[STEP 2/4] Creating MODEL_USAGE_METRICS table...
+[PASS] MODEL_USAGE_METRICS table created with 167 models
+
+[STEP 3/4] Creating MIGRATION_SCORING view and MIGRATION_PLAN table...
+[INFO] Generating AI rationales (this may take a few minutes)...
+[PASS] MIGRATION_PLAN table created
+
+[STEP 4/4] Creating semantic view for Cortex Analyst...
+[PASS] Semantic view MIGRATION_PLANNING_SEM created
+
+[SUCCESS] Migration Prioritization deployment complete!
 ```
 
-## How Metrics Are Generated
+### 3.4 Customization
 
-The `MODEL_USAGE_METRICS` table is the foundation of this solution. It combines data from three Snowflake ACCOUNT_USAGE views to build a comprehensive picture of each object's usage, performance, and dependencies.
+#### Change Target Database/Schema
 
-### Data Sources
-
-| Source View | What It Provides | Key Fields Used |
-|-------------|------------------|-----------------|
-| `SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY` | Object-level access patterns | `BASE_OBJECTS_ACCESSED`, `USER_NAME`, `QUERY_ID`, `QUERY_START_TIME` |
-| `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` | Query performance metrics | `TOTAL_ELAPSED_TIME`, `BYTES_SCANNED`, `ROWS_PRODUCED`, `EXECUTION_STATUS` |
-| `SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES` | Downstream object relationships | `REFERENCED_*`, `REFERENCING_*` columns |
-
-### Metric Definitions
-
-| Metric | Calculation | Description |
-|--------|-------------|-------------|
-| `total_queries_90d` | `COUNT(DISTINCT QUERY_ID)` | Number of unique queries that accessed this object in the last 90 days |
-| `distinct_users_90d` | `COUNT(DISTINCT USER_NAME)` | Number of unique users who queried this object |
-| `users_list` | `LISTAGG(DISTINCT USER_NAME)` | Comma-separated list of users for reference |
-| `last_used_at` | `MAX(QUERY_START_TIME)` | Timestamp of most recent access |
-| `days_since_last_use` | `DATEDIFF('day', last_used_at, CURRENT_TIMESTAMP())` | Staleness indicator |
-| `avg_execution_time_ms` | `AVG(TOTAL_ELAPSED_TIME)` | Average query duration in milliseconds |
-| `p95_execution_time_ms` | `PERCENTILE_CONT(0.95)` | 95th percentile execution time (outlier-resistant) |
-| `avg_bytes_scanned` | `AVG(BYTES_SCANNED)` | Average data read per query |
-| `avg_rows_returned` | `AVG(ROWS_PRODUCED)` | Average result set size |
-| `error_rate` | `SUM(failures) / COUNT(*)` | Fraction of queries that failed (0.0 - 1.0) |
-| `downstream_object_count` | `COUNT(DISTINCT REFERENCING_OBJECT_NAME)` | Number of views/tables that depend on this object |
-| `downstream_view_count` | `COUNT(DISTINCT ... WHERE DOMAIN='VIEW')` | Subset: dependent views only |
-| `downstream_table_count` | `COUNT(DISTINCT ... WHERE DOMAIN='TABLE')` | Subset: dependent tables only |
-| `downstream_objects_list` | `LISTAGG(DISTINCT REFERENCING_OBJECT_NAME)` | Comma-separated list of dependents |
-| `criticality_score` | See formula below | Composite priority score |
-
-### Query Processing Pipeline
-
-```
-Step 1: Extract Object Access (object_access CTE)
-├── Flatten BASE_OBJECTS_ACCESSED array from ACCESS_HISTORY
-├── Parse fully-qualified names into database/schema/object
-├── Filter to Tables, Views, Materialized Views only
-└── Exclude system users (SYSTEM, SNOWFLAKE, *_SERVICE, SYS_*)
-
-Step 2: Aggregate Query Metrics (query_metrics CTE)
-├── Join to QUERY_HISTORY on QUERY_ID
-├── Calculate COUNT, AVG, PERCENTILE aggregations
-└── Group by database_name, schema_name, object_name, object_type
-
-Step 3: Aggregate Dependencies (dependency_metrics CTE)
-├── Query OBJECT_DEPENDENCIES for referenced objects
-├── Count distinct downstream objects by type
-└── Group by database_name, schema_name, object_name
-
-Step 4: Join and Score (final SELECT)
-├── LEFT JOIN query_metrics to dependency_metrics
-├── Use UPPER() for case-insensitive matching
-├── Calculate criticality_score
-└── Filter to objects with total_queries_90d > 0
-```
-
-### Filters Applied
-
-The following records are **excluded** from analysis:
-
-| Filter | Reason |
-|--------|--------|
-| `USER_NAME IN ('SYSTEM', 'SNOWFLAKE')` | Internal Snowflake processes |
-| `USER_NAME LIKE '%_SERVICE'` | Service accounts (often automated) |
-| `USER_NAME LIKE 'SYS_%'` | System-generated users |
-| `object_type NOT IN ('Table', 'View', 'Materialized View')` | Focus on data objects only |
-| `total_queries_90d = 0` | Objects with no recent usage |
-
-### Customizing the Metrics Query
-
-You can modify `sql/01_model_usage_metrics.sql` to:
-
-**Include only specific databases:**
-```sql
--- In object_access CTE, add:
-AND SPLIT_PART(obj.value:objectName::STRING, '.', 1) IN ('PROD_DB', 'ANALYTICS_DB')
-```
-
-**Exclude staging/temp schemas:**
-```sql
--- In object_access CTE, add:
-AND SPLIT_PART(obj.value:objectName::STRING, '.', 2) NOT IN ('STAGING', 'TEMP', 'RAW')
-```
-
-**Change the lookback window:**
-```sql
--- Change from 90 days to 180 days:
-WHERE ah.QUERY_START_TIME >= DATEADD('day', -180, CURRENT_TIMESTAMP())
-```
-
-**Include service accounts:**
-```sql
--- Remove these lines from object_access CTE:
-AND ah.USER_NAME NOT LIKE '%_SERVICE'
-AND ah.USER_NAME NOT LIKE 'SYS_%'
-```
-
-## Wave Assignment Logic
-
-Models are assigned to migration waves based on usage and complexity:
-
-| Wave | Criteria | Recommendation |
-|------|----------|----------------|
-| **Wave 1** | >100 queries/90d AND ≤3 downstream dependencies | Migrate first - high usage, low risk |
-| **Wave 2** | >100 queries/90d AND >3 deps, OR >20 queries/90d | Migrate second - requires coordination |
-| **Wave 3** | ≤20 queries/90d | Migrate last - low priority |
-| **DEPRECATE** | >90 days since last use | Consider retirement |
-
-## Criticality Score
-
-Each model receives a criticality score (higher = more critical):
-
-```
-Score = (queries_90d × 0.4) + (users × 15) + (dependencies × 20) + (error_penalty)
-```
-
-- **Query weight (0.4)**: Frequent usage indicates business importance
-- **User weight (15)**: Multi-user models have broader impact
-- **Dependency weight (20)**: Downstream objects multiply migration risk
-- **Error penalty (+10)**: Models with >5% error rate need attention
-
-## Usage Examples
-
-### View Migration Plan
-
-```sql
--- Top priority models
-SELECT 
-    model_name,
-    migration_wave,
-    impact_level,
-    risk_level,
-    criticality_score,
-    migration_rationale
-FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
-ORDER BY criticality_score DESC
-LIMIT 20;
-```
-
-### Wave Summary
-
-```sql
--- Models per wave with metrics
-SELECT 
-    migration_wave,
-    COUNT(*) AS model_count,
-    SUM(total_queries_90d) AS total_queries,
-    SUM(distinct_users_90d) AS total_users,
-    AVG(criticality_score)::INT AS avg_criticality
-FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
-GROUP BY migration_wave
-ORDER BY migration_wave;
-```
-
-### High-Risk Models
-
-```sql
--- Models with high usage and many dependencies
-SELECT *
-FROM MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS
-WHERE total_queries_90d > 100
-  AND downstream_object_count > 3
-ORDER BY criticality_score DESC;
-```
-
-### Stale Models (Cleanup Candidates)
-
-```sql
--- Unused models with dependencies (potential cleanup)
-SELECT *
-FROM MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS
-WHERE days_since_last_use > 60
-  AND downstream_object_count > 0
-ORDER BY downstream_object_count DESC;
-```
-
-### Performance Hotspots
-
-```sql
--- Slow, frequently-used models
-SELECT 
-    model_name,
-    total_queries_90d,
-    avg_execution_time_ms,
-    p95_execution_time_ms
-FROM MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS
-WHERE avg_execution_time_ms > 1000
-  AND total_queries_90d > 50
-ORDER BY avg_execution_time_ms DESC;
-```
-
-## Using with Cortex Analyst
-
-The semantic view enables natural language queries. Use it with Snowflake Intelligence or the SEMANTIC_VIEW function:
-
-**Example natural language queries:**
-- "How many models are in Wave 1?"
-- "Show me high impact models"
-- "Which models have the most dependencies?"
-- "What's the average criticality score by wave?"
-
-## Customization
-
-### Change Target Database/Schema
-
-Edit `sql/deploy.sql` and replace all occurrences of:
+Edit `sql/deploy.sql` and replace:
 - `MIGRATION_PLANNING` → your database name
 - `ANALYTICS` → your schema name
 
-### Adjust Wave Thresholds
+#### Filter to Specific Databases
 
-Modify the CASE statement in `sql/deploy.sql` (Step 3a):
+Add to the `object_access` CTE:
 
 ```sql
-CASE
-    WHEN m.days_since_last_use > 90 THEN 'DEPRECATE'
-    WHEN m.total_queries_90d > 100 AND m.downstream_object_count <= 3 THEN 'Wave 1'
-    -- Adjust thresholds as needed
-    ...
-END AS migration_wave
+AND SPLIT_PART(obj.value:objectName::STRING, '.', 1) IN ('PROD_DB', 'ANALYTICS_DB')
 ```
 
-### Modify Criticality Score Weights
+#### Exclude Staging Schemas
 
-Update the score calculation in Step 2 of `sql/deploy.sql`:
+```sql
+AND SPLIT_PART(obj.value:objectName::STRING, '.', 2) NOT IN ('STAGING', 'TEMP', 'RAW')
+```
+
+#### Change Lookback Window
+
+```sql
+-- From 90 days to 180 days:
+WHERE ah.QUERY_START_TIME >= DATEADD('day', -180, CURRENT_TIMESTAMP())
+```
+
+#### Adjust Criticality Weights
 
 ```sql
 ROUND(
-    (q.total_queries_90d * 0.4) +      -- Query frequency weight
-    (q.distinct_users_90d * 15) +       -- User impact weight
-    (COALESCE(d.downstream_object_count, 0) * 20) +  -- Dependency weight
-    (CASE WHEN q.error_rate > 0.05 THEN 10 ELSE 0 END),  -- Error penalty
+    (q.total_queries_90d * 0.4) +      -- Increase for usage focus
+    (q.distinct_users_90d * 15) +       -- Increase for user impact focus
+    (downstream_object_count * 20) +    -- Increase for blast radius focus
+    (CASE WHEN q.error_rate > 0.05 THEN 10 ELSE 0 END),
 2) AS criticality_score
 ```
 
-### Filter Specific Databases/Schemas
-
-Add WHERE clauses to the `object_access` CTE in Step 2:
-
-```sql
-WHERE ah.QUERY_START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
-  AND obj.value:objectDomain::STRING IN ('Table', 'View', 'Materialized View')
-  -- Add your filters:
-  AND SPLIT_PART(obj.value:objectName::STRING, '.', 1) IN ('MY_DB_1', 'MY_DB_2')
-  AND SPLIT_PART(obj.value:objectName::STRING, '.', 2) NOT IN ('STAGING', 'TEMP')
-```
-
-## Refreshing the Migration Plan
+### 3.5 Refreshing Data
 
 The `MIGRATION_PLAN` table is a point-in-time snapshot. To refresh:
 
 ```sql
--- Re-run the table creation (Step 3b in deploy.sql)
+-- Manual refresh
 CREATE OR REPLACE TABLE MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN AS
-SELECT ... -- (full query from deploy.sql)
+SELECT ... -- (copy from deploy.sql Step 3b)
 ```
 
-Or set up a scheduled task:
-
 ```sql
+-- Scheduled refresh (weekly)
 CREATE OR REPLACE TASK MIGRATION_PLANNING.ANALYTICS.REFRESH_MIGRATION_PLAN
   WAREHOUSE = <your_warehouse>
-  SCHEDULE = 'USING CRON 0 6 * * 1 America/Los_Angeles'  -- Weekly Monday 6am
+  SCHEDULE = 'USING CRON 0 6 * * 1 America/Los_Angeles'
 AS
   CREATE OR REPLACE TABLE MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN AS ...;
+
+ALTER TASK MIGRATION_PLANNING.ANALYTICS.REFRESH_MIGRATION_PLAN RESUME;
 ```
 
-## Known Limitations & Caveats
+### 3.6 Validation Queries
 
-Before deploying to production, be aware of these design decisions and their implications:
+After deployment, verify data quality:
 
-### 1. Performance Metrics Are Query-Level, Not Object-Level
-
-`avg_bytes_scanned` and `avg_rows_returned` represent the **average metrics of queries that touched this object**, not the bytes/rows attributable to the object itself. A query joining 5 tables will attribute its full `BYTES_SCANNED` to all 5 tables.
-
-**Impact**: These metrics are directionally useful for identifying "hot" objects but should not be interpreted as precise per-object I/O.
-
-### 2. LISTAGG Output Size Limits
-
-The `users_list` and `downstream_objects_list` fields use `LISTAGG()` which has an output limit (~16MB). For extremely hot objects with hundreds of users or dependencies, this could truncate or fail.
-
-**Mitigation** (if needed):
 ```sql
-LEFT(LISTAGG(DISTINCT USER_NAME, ', ') WITHIN GROUP (ORDER BY USER_NAME), 8000) AS users_list
+-- Check row counts
+SELECT COUNT(*) FROM MIGRATION_PLANNING.ANALYTICS.MODEL_USAGE_METRICS;
+SELECT COUNT(*) FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN;
+
+-- Verify wave distribution
+SELECT migration_wave, COUNT(*) AS models
+FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
+GROUP BY 1 ORDER BY 1;
+
+-- Sample top-priority models
+SELECT model_name, migration_wave, criticality_score, migration_rationale
+FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
+ORDER BY criticality_score DESC
+LIMIT 10;
 ```
 
-### 3. Downstream Dependency Counting
+---
 
-Dependencies are counted by object name only, not fully-qualified name. If you have `SCHEMA_A.DAILY_SALES` and `SCHEMA_B.DAILY_SALES` both depending on the same source, they count as 2 (correct). However, the current implementation would count them correctly because we group by `(REFERENCED_DATABASE, REFERENCED_SCHEMA, REFERENCED_OBJECT_NAME)`.
+## 4. Known Limitations
 
-**If you need fully-qualified downstream names** in the list, modify `dependency_metrics`:
+### 4.1 Data Source Limitations
+
+#### Performance Metrics Are Query-Level
+
+`avg_bytes_scanned` and `avg_rows_returned` represent **query-level** metrics, not per-object attribution. A query joining 5 tables attributes its full `BYTES_SCANNED` to all 5.
+
+**Impact**: Directionally useful for "hot" object identification, but not precise per-object I/O.
+
+#### Data Latency
+
+| Source | Latency |
+|--------|---------|
+| ACCESS_HISTORY | Up to 3 hours |
+| OBJECT_DEPENDENCIES | Up to 3 hours |
+| QUERY_HISTORY | Up to 45 minutes |
+
+#### Enterprise Edition Required
+
+`ACCESS_HISTORY` requires Enterprise Edition. Standard Edition alternatives:
+- Parse `QUERY_HISTORY.QUERY_TEXT` (less accurate)
+- Use `OBJECT_DEPENDENCIES` only (no usage metrics)
+
+### 4.2 Query Implementation Limitations
+
+#### LISTAGG Output Size
+
+`users_list` and `downstream_objects_list` use `LISTAGG()` with ~16MB output limit. Extremely hot objects could truncate.
+
+**Mitigation**:
 ```sql
-COUNT(DISTINCT REFERENCING_DATABASE || '.' || REFERENCING_SCHEMA || '.' || REFERENCING_OBJECT_NAME) AS downstream_object_count
+LEFT(LISTAGG(...), 8000) AS users_list
 ```
 
-### 4. Object Name Parsing
+#### Object Name Parsing
 
-The query uses `SPLIT_PART(objectName, '.', N)` to parse `DATABASE.SCHEMA.OBJECT` names. This assumes standard naming without dots in identifiers. Objects with dots in their names (e.g., `"my.table"`) will be misparsed.
+`SPLIT_PART(objectName, '.', N)` assumes no dots in identifiers. Objects named `"my.table"` will misparse.
 
-**Impact**: Rare in practice. If your organization uses dots in object names, additional parsing logic is needed.
+**Impact**: Rare in practice; document for customers with exotic naming.
 
-### 5. User Filtering Excludes Service Accounts
+#### Downstream Uniqueness
 
-The following patterns are excluded from usage metrics:
-- `SYSTEM`, `SNOWFLAKE` (internal)
-- `*_SERVICE` (service accounts)
-- `SYS_*` (system-generated)
+Dependencies count by object name only. Same-named objects in different schemas count correctly due to grouping, but the list doesn't show fully-qualified names.
 
-**Impact**: If you have legitimate BI or ETL service accounts (e.g., `TABLEAU_SERVICE`), their queries won't be counted. Consider removing these filters or tracking service account usage separately.
-
-### 6. Criticality Score Is a Tunable Heuristic
-
-The default weights are:
-```
-Score = (queries × 0.4) + (users × 15) + (dependencies × 20) + (error_penalty)
+**If needed**:
+```sql
+COUNT(DISTINCT REFERENCING_DATABASE || '.' || REFERENCING_SCHEMA || '.' || REFERENCING_OBJECT_NAME)
 ```
 
-This is a **starting point**, not a definitive formula. Adjust based on your priorities:
-- **Blast radius focused**: Increase dependency weight
-- **Usage focused**: Increase query/user weights
-- **Stability focused**: Increase error penalty or adjust threshold
+### 4.3 Filtering Limitations
 
-### 7. Performance at Scale
+#### Service Accounts Excluded
 
-For large accounts, the 90-day `ACCESS_HISTORY + FLATTEN` operation can be resource-intensive. Consider:
-- Restricting to specific databases/schemas if migration scope is narrow
-- Using a Dynamic Table with scheduled refresh instead of full table recreation
-- Moving LISTAGG fields to a separate detail table (they're not needed for scoring)
+These patterns are excluded: `SYSTEM`, `SNOWFLAKE`, `*_SERVICE`, `SYS_*`
 
-## Important Notes
+**Impact**: Legitimate BI/ETL accounts (e.g., `TABLEAU_SERVICE`) won't be counted. Remove filters if needed.
 
-### Data Latency
+### 4.4 Scoring Limitations
 
-- **ACCESS_HISTORY**: Up to 3 hours latency
-- **OBJECT_DEPENDENCIES**: Up to 3 hours latency
-- **QUERY_HISTORY**: Up to 45 minutes latency
+#### Criticality Score Is Heuristic
 
-### Cost Considerations
+The default weights are a **starting point**:
+```
+(queries × 0.4) + (users × 15) + (deps × 20) + (error_penalty)
+```
 
-- **AI_CLASSIFY**: ~0.001 credits per call
-- **AI_COMPLETE**: ~0.01-0.05 credits per call (varies by response length)
-- Initial deployment with 100+ models may use 5-20 credits for AI rationale generation
+Adjust based on priorities:
+- **Blast radius focus**: Increase dependency weight
+- **Usage focus**: Increase query/user weights
+- **Stability focus**: Increase error penalty
 
-### Enterprise Edition Requirement
+#### AI Classification Is Non-Deterministic
 
-ACCESS_HISTORY is only available in Enterprise Edition and higher. Without it, you cannot track object-level access patterns. Alternative approaches for Standard Edition:
-- Use QUERY_HISTORY text parsing (less accurate)
-- Use OBJECT_DEPENDENCIES only (no usage metrics)
+`AI_CLASSIFY` may produce slightly different results on re-run. Wave assignment uses deterministic rules to ensure consistency.
+
+### 4.5 Performance Limitations
+
+#### Large Account Overhead
+
+The 90-day `ACCESS_HISTORY + FLATTEN` can be resource-intensive on large accounts.
+
+**Mitigations**:
+- Restrict to specific databases/schemas
+- Use Dynamic Table with scheduled refresh
+- Move LISTAGG fields to separate detail table
+
+### 4.6 Cost Considerations
+
+| Function | Approximate Cost |
+|----------|------------------|
+| AI_CLASSIFY | ~0.001 credits/call |
+| AI_COMPLETE | ~0.01-0.05 credits/call |
+| Initial deployment (100+ models) | 5-20 credits for AI rationales |
+
+---
 
 ## File Structure
 
 ```
 migration-prioritization-project/
-├── README.md                           # This file
+├── README.md                                # This design document
 └── sql/
-    ├── deploy.sql                      # Master deployment script
-    ├── 01_model_usage_metrics.sql      # Step 1: Usage metrics table
-    ├── 02_cortex_migration_recommendations.sql  # Step 2-3: AI scoring
-    ├── 03_semantic_view.sql            # Step 4: Semantic view
-    └── 03_sample_queries.sql           # Example analysis queries
+    ├── deploy.sql                           # Master deployment script
+    ├── 01_model_usage_metrics.sql           # Step 1: Usage metrics table
+    ├── 02_cortex_migration_recommendations.sql  # Steps 2-3: AI scoring
+    ├── 03_semantic_view.sql                 # Step 4: Semantic view
+    └── 03_sample_queries.sql                # Example analysis queries
 ```
 
-## Troubleshooting
+---
 
-### "ACCESS_HISTORY does not exist"
-Your account is not Enterprise Edition. Contact Snowflake to upgrade.
+## References
 
-### "Insufficient privileges on SNOWFLAKE.ACCOUNT_USAGE"
-```sql
-GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE <your_role>;
-```
-
-### "AI_CLASSIFY/AI_COMPLETE not found"
-```sql
-GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE <your_role>;
-```
-
-### No models appearing in results
-- Check that the 90-day lookback window has data
-- Verify your role has access to the databases being analyzed
-- System users (SYSTEM, SNOWFLAKE, *_SERVICE) are excluded by default
-
-## Support
-
-For questions or issues:
-- Review [Snowflake ACCOUNT_USAGE documentation](https://docs.snowflake.com/en/sql-reference/account-usage)
-- Review [Snowflake AISQL documentation](https://docs.snowflake.com/en/sql-reference/functions/ai_classify)
-- Review [Semantic Views documentation](https://docs.snowflake.com/en/user-guide/views-semantic/overview)
+- [Snowflake ACCOUNT_USAGE Documentation](https://docs.snowflake.com/en/sql-reference/account-usage)
+- [Snowflake AISQL Functions](https://docs.snowflake.com/en/sql-reference/functions/ai_classify)
+- [Semantic Views Documentation](https://docs.snowflake.com/en/user-guide/views-semantic/overview)
