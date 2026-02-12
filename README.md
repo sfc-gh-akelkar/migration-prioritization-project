@@ -431,6 +431,24 @@ snow sql -f sql/deploy.sql
 
 ### 3.4 Customization
 
+#### Skip the Cortex Agent (Optional)
+
+If you don't need the Snowflake Intelligence chatbot, comment out or remove Step 5 in `deploy.sql`. You can query the `MIGRATION_PLAN` table directly:
+
+```sql
+-- Top priority models
+SELECT model_name, database_name, migration_wave, criticality_score, migration_rationale
+FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
+ORDER BY criticality_score DESC;
+
+-- Wave summary
+SELECT migration_wave, COUNT(*) as models, SUM(total_queries_90d) as total_queries
+FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
+GROUP BY 1 ORDER BY 1;
+```
+
+See `sql/sample_queries.sql` for more examples.
+
 #### Change Target Database/Schema
 
 Edit `sql/deploy.sql` and replace:
@@ -439,9 +457,9 @@ Edit `sql/deploy.sql` and replace:
 
 #### Change Warehouse for Agent
 
-Edit `sql/04_cortex_agent.sql` and update:
-```json
-"warehouse": "YOUR_WAREHOUSE"
+Edit `sql/deploy.sql` and update the CONFIGURATION section:
+```sql
+SET AGENT_WAREHOUSE = 'YOUR_WAREHOUSE';
 ```
 
 #### Filter to Specific Databases
