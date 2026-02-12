@@ -379,6 +379,68 @@ AS
   CREATE OR REPLACE TABLE MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN AS ...;
 ```
 
+## Known Limitations & Caveats
+
+Before deploying to production, be aware of these design decisions and their implications:
+
+### 1. Performance Metrics Are Query-Level, Not Object-Level
+
+`avg_bytes_scanned` and `avg_rows_returned` represent the **average metrics of queries that touched this object**, not the bytes/rows attributable to the object itself. A query joining 5 tables will attribute its full `BYTES_SCANNED` to all 5 tables.
+
+**Impact**: These metrics are directionally useful for identifying "hot" objects but should not be interpreted as precise per-object I/O.
+
+### 2. LISTAGG Output Size Limits
+
+The `users_list` and `downstream_objects_list` fields use `LISTAGG()` which has an output limit (~16MB). For extremely hot objects with hundreds of users or dependencies, this could truncate or fail.
+
+**Mitigation** (if needed):
+```sql
+LEFT(LISTAGG(DISTINCT USER_NAME, ', ') WITHIN GROUP (ORDER BY USER_NAME), 8000) AS users_list
+```
+
+### 3. Downstream Dependency Counting
+
+Dependencies are counted by object name only, not fully-qualified name. If you have `SCHEMA_A.DAILY_SALES` and `SCHEMA_B.DAILY_SALES` both depending on the same source, they count as 2 (correct). However, the current implementation would count them correctly because we group by `(REFERENCED_DATABASE, REFERENCED_SCHEMA, REFERENCED_OBJECT_NAME)`.
+
+**If you need fully-qualified downstream names** in the list, modify `dependency_metrics`:
+```sql
+COUNT(DISTINCT REFERENCING_DATABASE || '.' || REFERENCING_SCHEMA || '.' || REFERENCING_OBJECT_NAME) AS downstream_object_count
+```
+
+### 4. Object Name Parsing
+
+The query uses `SPLIT_PART(objectName, '.', N)` to parse `DATABASE.SCHEMA.OBJECT` names. This assumes standard naming without dots in identifiers. Objects with dots in their names (e.g., `"my.table"`) will be misparsed.
+
+**Impact**: Rare in practice. If your organization uses dots in object names, additional parsing logic is needed.
+
+### 5. User Filtering Excludes Service Accounts
+
+The following patterns are excluded from usage metrics:
+- `SYSTEM`, `SNOWFLAKE` (internal)
+- `*_SERVICE` (service accounts)
+- `SYS_*` (system-generated)
+
+**Impact**: If you have legitimate BI or ETL service accounts (e.g., `TABLEAU_SERVICE`), their queries won't be counted. Consider removing these filters or tracking service account usage separately.
+
+### 6. Criticality Score Is a Tunable Heuristic
+
+The default weights are:
+```
+Score = (queries × 0.4) + (users × 15) + (dependencies × 20) + (error_penalty)
+```
+
+This is a **starting point**, not a definitive formula. Adjust based on your priorities:
+- **Blast radius focused**: Increase dependency weight
+- **Usage focused**: Increase query/user weights
+- **Stability focused**: Increase error penalty or adjust threshold
+
+### 7. Performance at Scale
+
+For large accounts, the 90-day `ACCESS_HISTORY + FLATTEN` operation can be resource-intensive. Consider:
+- Restricting to specific databases/schemas if migration scope is narrow
+- Using a Dynamic Table with scheduled refresh instead of full table recreation
+- Moving LISTAGG fields to a separate detail table (they're not needed for scoring)
+
 ## Important Notes
 
 ### Data Latency
