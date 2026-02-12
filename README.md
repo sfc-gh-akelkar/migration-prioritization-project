@@ -21,7 +21,7 @@ Organizations migrating data platforms need to prioritize which models (tables, 
 
 ### Solution Approach
 
-The solution follows a 4-step pattern that leverages Snowflake's built-in observability and AI capabilities:
+The solution follows a 5-step pattern that leverages Snowflake's built-in observability and AI capabilities:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -68,10 +68,20 @@ The solution follows a 4-step pattern that leverages Snowflake's built-in observ
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  STEP 4: MIGRATION_PLANNING_SEM (Semantic View)                             │
 │  ──────────────────────────────────────────────                             │
-│  Enables natural language queries via Cortex Analyst:                       │
-│  • "Show me Wave 1 models"                                                  │
-│  • "Which models have the most dependencies?"                               │
-│  • "What's the average criticality by database?"                            │
+│  Defines semantic layer for natural language queries:                       │
+│  • Dimensions (database, schema, model, wave, impact, risk)                 │
+│  • Metrics (query count, user count, dependencies, criticality)             │
+│  • Synonyms for flexible natural language interpretation                    │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 5: MIGRATION_PLANNING_AGENT (Cortex Agent)                            │
+│  ──────────────────────────────────────────────────                         │
+│  Enables conversational queries via Snowflake Intelligence:                 │
+│  • "Which models should I migrate first?"                                   │
+│  • "Show me high-risk models with many dependencies"                        │
+│  • "What's the total query count for Wave 1?"                               │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,7 +89,8 @@ The solution follows a 4-step pattern that leverages Snowflake's built-in observ
 
 | Decision | Rationale |
 |----------|-----------|
-| **AISQL over Cortex Agents** | Batch scoring workloads benefit from AISQL's row-by-row processing; Agents are better for interactive exploration |
+| **AISQL for batch scoring** | Batch scoring workloads benefit from AISQL's row-by-row processing |
+| **Cortex Agent for interaction** | Natural language queries via Snowflake Intelligence; conversational interface |
 | **Table over View for metrics** | Snapshot semantics; avoids repeated expensive ACCOUNT_USAGE queries |
 | **Rules-based wave assignment** | Deterministic, auditable; AI adds rationale, not the classification itself |
 | **90-day lookback window** | Balances recency vs. sample size; configurable |
@@ -91,7 +102,8 @@ The solution follows a 4-step pattern that leverages Snowflake's built-in observ
 | `MODEL_USAGE_METRICS` | Table | Foundation metrics from ACCOUNT_USAGE |
 | `MIGRATION_SCORING` | View | Real-time AI classification layer |
 | `MIGRATION_PLAN` | Table | Materialized plan with AI rationales |
-| `MIGRATION_PLANNING_SEM` | Semantic View | Natural language query interface |
+| `MIGRATION_PLANNING_SEM` | Semantic View | Semantic layer for text-to-SQL |
+| `MIGRATION_PLANNING_AGENT` | Cortex Agent | Snowflake Intelligence interface |
 
 ---
 
@@ -254,7 +266,7 @@ AI_COMPLETE(
 
 ### 2.4 MIGRATION_PLANNING_SEM: Semantic View
 
-Enables natural language queries via Cortex Analyst.
+Defines the semantic layer that powers the Cortex Agent's text-to-SQL capabilities.
 
 #### Dimensions (Filterable Attributes)
 
@@ -276,6 +288,55 @@ Enables natural language queries via Cortex Analyst.
 | `dependency_count` | `SUM(downstream_object_count)` | dependencies |
 | `avg_criticality` | `AVG(criticality_score)` | criticality, score |
 
+### 2.5 MIGRATION_PLANNING_AGENT: Snowflake Intelligence Interface
+
+The Cortex Agent enables conversational interaction via Snowflake Intelligence.
+
+#### Agent Configuration
+
+```json
+{
+  "models": {
+    "orchestration": "claude-4-sonnet"
+  },
+  "instructions": {
+    "orchestration": "You are a migration planning assistant. Use the migration_data tool to answer questions about model usage, dependencies, migration waves, and prioritization.",
+    "response": "Provide clear, actionable migration guidance. Always mention criticality score and migration wave when discussing specific models."
+  },
+  "tools": [
+    {
+      "tool_spec": {
+        "type": "cortex_analyst_text_to_sql",
+        "name": "migration_data",
+        "description": "Query migration planning data including model usage metrics, dependency counts, impact/risk levels, migration wave assignments, and AI-generated rationales."
+      }
+    }
+  ],
+  "tool_resources": {
+    "migration_data": {
+      "semantic_view": "MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLANNING_SEM",
+      "execution_environment": {
+        "type": "warehouse",
+        "warehouse": "APP_WH"
+      }
+    }
+  }
+}
+```
+
+#### Agent Location
+
+The agent is created in the `SNOWFLAKE_INTELLIGENCE.AGENTS` schema, which is required for agents to appear in the Snowflake Intelligence UI (AI & ML > Snowflake Intelligence).
+
+#### Example Conversations
+
+| User Question | Agent Response |
+|--------------|----------------|
+| "Which models should I migrate first?" | Lists Wave 1 models sorted by criticality score |
+| "Show me high-risk models" | Filters for risk_level = 'HIGH' with dependency details |
+| "How many models are in each wave?" | Aggregates model counts by migration_wave |
+| "What are the most critical tables in PROD_DB?" | Filters by database and sorts by criticality |
+
 ---
 
 ## 3. Deployment Guide
@@ -289,6 +350,7 @@ Enables natural language queries via Cortex Analyst.
 | **Edition** | Enterprise Edition or higher (required for ACCESS_HISTORY) |
 | **Role** | ACCOUNTADMIN or custom role with privileges below |
 | **Cortex Access** | SNOWFLAKE.CORTEX_USER database role |
+| **Cortex Agents** | CREATE AGENT privilege (for Snowflake Intelligence) |
 
 #### Required Privileges
 
@@ -303,6 +365,9 @@ GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE <your_role>;
 GRANT CREATE DATABASE ON ACCOUNT TO ROLE <your_role>;
 -- OR for existing database:
 GRANT CREATE SCHEMA ON DATABASE <your_database> TO ROLE <your_role>;
+
+-- For Cortex Agent creation
+GRANT CREATE AGENT ON SCHEMA SNOWFLAKE_INTELLIGENCE.AGENTS TO ROLE <your_role>;
 ```
 
 ### 3.2 Deployment Steps
@@ -328,18 +393,21 @@ snow sql -f sql/deploy.sql
 ### 3.3 Deployment Output
 
 ```
-[STEP 1/4] Creating database and schema...
+[STEP 1/5] Creating database and schema...
 [PASS] Database MIGRATION_PLANNING.ANALYTICS created
 
-[STEP 2/4] Creating MODEL_USAGE_METRICS table...
+[STEP 2/5] Creating MODEL_USAGE_METRICS table...
 [PASS] MODEL_USAGE_METRICS table created with 167 models
 
-[STEP 3/4] Creating MIGRATION_SCORING view and MIGRATION_PLAN table...
+[STEP 3/5] Creating MIGRATION_SCORING view and MIGRATION_PLAN table...
 [INFO] Generating AI rationales (this may take a few minutes)...
 [PASS] MIGRATION_PLAN table created
 
-[STEP 4/4] Creating semantic view for Cortex Analyst...
+[STEP 4/5] Creating semantic view...
 [PASS] Semantic view MIGRATION_PLANNING_SEM created
+
+[STEP 5/5] Creating Cortex Agent for Snowflake Intelligence...
+[PASS] Cortex Agent MIGRATION_PLANNING_AGENT created
 
 [SUCCESS] Migration Prioritization deployment complete!
 ```
@@ -351,6 +419,13 @@ snow sql -f sql/deploy.sql
 Edit `sql/deploy.sql` and replace:
 - `MIGRATION_PLANNING` → your database name
 - `ANALYTICS` → your schema name
+
+#### Change Warehouse for Agent
+
+Edit `sql/04_cortex_agent.sql` and update:
+```json
+"warehouse": "YOUR_WAREHOUSE"
+```
 
 #### Filter to Specific Databases
 
@@ -384,7 +459,24 @@ ROUND(
 2) AS criticality_score
 ```
 
-### 3.5 Refreshing Data
+### 3.5 Using Snowflake Intelligence
+
+After deployment, access the migration planning agent:
+
+1. Navigate to **AI & ML > Snowflake Intelligence** in Snowsight
+2. Select **Migration Planning Assistant** from the agent list
+3. Start asking questions:
+
+**Example queries:**
+- "Which models should I migrate first?"
+- "Show me Wave 1 models with their criticality scores"
+- "How many models have high risk?"
+- "What are the most-used tables in ANALYTICS schema?"
+- "List models with more than 5 downstream dependencies"
+
+The agent uses the semantic view to translate natural language to SQL and returns formatted results.
+
+### 3.6 Refreshing Data
 
 The `MIGRATION_PLAN` table is a point-in-time snapshot. To refresh:
 
@@ -405,7 +497,7 @@ AS
 ALTER TASK MIGRATION_PLANNING.ANALYTICS.REFRESH_MIGRATION_PLAN RESUME;
 ```
 
-### 3.6 Validation Queries
+### 3.7 Validation Queries
 
 After deployment, verify data quality:
 
@@ -424,6 +516,9 @@ SELECT model_name, migration_wave, criticality_score, migration_rationale
 FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN
 ORDER BY criticality_score DESC
 LIMIT 10;
+
+-- Verify agent exists
+SHOW AGENTS IN SCHEMA SNOWFLAKE_INTELLIGENCE.AGENTS;
 ```
 
 ---
@@ -523,6 +618,16 @@ The 90-day `ACCESS_HISTORY + FLATTEN` can be resource-intensive on large account
 | AI_COMPLETE | ~0.01-0.05 credits/call |
 | Initial deployment (100+ models) | 5-20 credits for AI rationales |
 
+### 4.7 Cortex Agent Limitations
+
+#### Warehouse Requirement
+
+The agent requires a warehouse for query execution. Ensure the warehouse in `04_cortex_agent.sql` matches your environment.
+
+#### User's Default Role
+
+Snowflake Intelligence uses the user's **default role** and **default warehouse**. Ensure users have appropriate access.
+
 ---
 
 ## File Structure
@@ -535,6 +640,7 @@ migration-prioritization-project/
     ├── 01_model_usage_metrics.sql           # Step 1: Usage metrics table
     ├── 02_cortex_migration_recommendations.sql  # Steps 2-3: AI scoring
     ├── 03_semantic_view.sql                 # Step 4: Semantic view
+    ├── 04_cortex_agent.sql                  # Step 5: Cortex Agent
     └── 03_sample_queries.sql                # Example analysis queries
 ```
 
@@ -545,3 +651,5 @@ migration-prioritization-project/
 - [Snowflake ACCOUNT_USAGE Documentation](https://docs.snowflake.com/en/sql-reference/account-usage)
 - [Snowflake AISQL Functions](https://docs.snowflake.com/en/sql-reference/functions/ai_classify)
 - [Semantic Views Documentation](https://docs.snowflake.com/en/user-guide/views-semantic/overview)
+- [Cortex Agents Documentation](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents)
+- [Snowflake Intelligence](https://docs.snowflake.com/user-guide/snowflake-cortex/snowflake-intelligence)

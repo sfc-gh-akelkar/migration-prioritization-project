@@ -11,9 +11,10 @@
 --
 -- Deployment Order:
 --   1. Create database and schema
---   2. Deploy MODEL_USAGE_METRICS view
+--   2. Deploy MODEL_USAGE_METRICS table
 --   3. Deploy MIGRATION_SCORING view and MIGRATION_PLAN table
 --   4. Deploy MIGRATION_PLANNING_SEM semantic view
+--   5. Deploy Cortex Agent for Snowflake Intelligence
 --
 -- Usage:
 --   snow sql -f sql/deploy.sql
@@ -344,6 +345,64 @@ SELECT '[PASS] Semantic view MIGRATION_PLANNING_SEM created' AS status;
 
 
 -- =============================================================================
+-- STEP 5: CREATE CORTEX AGENT FOR SNOWFLAKE INTELLIGENCE
+-- =============================================================================
+
+SELECT '[STEP 5/5] Creating Cortex Agent for Snowflake Intelligence...' AS status;
+
+-- Ensure SNOWFLAKE_INTELLIGENCE database and schema exist
+CREATE DATABASE IF NOT EXISTS SNOWFLAKE_INTELLIGENCE;
+CREATE SCHEMA IF NOT EXISTS SNOWFLAKE_INTELLIGENCE.AGENTS;
+
+-- Grant access for discoverability
+GRANT USAGE ON DATABASE SNOWFLAKE_INTELLIGENCE TO ROLE PUBLIC;
+GRANT USAGE ON SCHEMA SNOWFLAKE_INTELLIGENCE.AGENTS TO ROLE PUBLIC;
+
+-- Create the Migration Planning Agent
+CREATE OR REPLACE AGENT SNOWFLAKE_INTELLIGENCE.AGENTS.MIGRATION_PLANNING_AGENT
+  COMMENT = 'AI assistant for migration planning - analyzes model usage, dependencies, and prioritization'
+  PROFILE = '{"display_name": "Migration Planning Assistant", "avatar": "database", "color": "#29B5E8"}'
+  FROM SPECIFICATION $
+  {
+    "models": {
+      "orchestration": "claude-4-sonnet"
+    },
+    "instructions": {
+      "orchestration": "You are a migration planning assistant. Use the migration_data tool to answer questions about model usage, dependencies, migration waves, and prioritization. When users ask about which models to migrate first, focus on Wave 1 models. For risk assessment, highlight models with high downstream dependencies.",
+      "response": "Provide clear, actionable migration guidance. When showing data, summarize key insights. Always mention the criticality score and migration wave when discussing specific models. Format numbers clearly and round decimals."
+    },
+    "tools": [
+      {
+        "tool_spec": {
+          "type": "cortex_analyst_text_to_sql",
+          "name": "migration_data",
+          "description": "Query migration planning data including model usage metrics, dependency counts, impact/risk levels, migration wave assignments, and AI-generated rationales. Use for questions about: which models to migrate first, high-risk models, unused models, dependency analysis, user impact."
+        }
+      }
+    ],
+    "tool_resources": {
+      "migration_data": {
+        "semantic_view": "MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLANNING_SEM",
+        "execution_environment": {
+          "type": "warehouse",
+          "warehouse": "APP_WH"
+        },
+        "query_timeout": 60
+      }
+    }
+  }
+  $;
+
+-- Grant agent access
+GRANT USAGE ON AGENT SNOWFLAKE_INTELLIGENCE.AGENTS.MIGRATION_PLANNING_AGENT TO ROLE PUBLIC;
+
+-- Grant access to the underlying semantic view
+GRANT SELECT ON SEMANTIC VIEW MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLANNING_SEM TO ROLE PUBLIC;
+
+SELECT '[PASS] Cortex Agent MIGRATION_PLANNING_AGENT created in Snowflake Intelligence' AS status;
+
+
+-- =============================================================================
 -- DEPLOYMENT COMPLETE
 -- =============================================================================
 
@@ -357,7 +416,7 @@ SELECT 'Database', 'MIGRATION_PLANNING'
 UNION ALL
 SELECT 'Schema', 'ANALYTICS'
 UNION ALL
-SELECT 'Objects Created', '4 (1 view, 2 tables, 1 semantic view)'
+SELECT 'Objects Created', '5 (1 view, 2 tables, 1 semantic view, 1 agent)'
 UNION ALL
 SELECT 'Total Models Analyzed', (SELECT COUNT(*)::STRING FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN)
 UNION ALL
@@ -372,6 +431,7 @@ SELECT 'Deprecation Candidates', (SELECT COUNT(*)::STRING FROM MIGRATION_PLANNIN
 SELECT '
 Next Steps:
 1. Review migration plan: SELECT * FROM MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLAN ORDER BY criticality_score DESC;
-2. Query via Cortex Analyst: Use the MIGRATION_PLANNING_SEM semantic view
-3. Run sample queries: snow sql -f sql/04_sample_queries.sql
+2. Open Snowflake Intelligence: AI & ML > Snowflake Intelligence
+3. Select "Migration Planning Assistant" agent
+4. Ask: "Which models should I migrate first?" or "Show me high-risk models"
 ' AS next_steps;
