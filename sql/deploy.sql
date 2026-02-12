@@ -17,13 +17,25 @@
 --   5. Deploy Cortex Agent for Snowflake Intelligence
 --
 -- Usage:
---   snow sql -f sql/deploy.sql
+--   1. Update CONFIGURATION section below with your values
+--   2. Run: snow sql -f sql/deploy.sql
+--   OR copy/paste into a Snowsight worksheet and execute
 --
--- Estimated Runtime:
---   - Steps 1-2: ~30 seconds
---   - Step 3 (AISQL scoring): 2-10 minutes depending on model count
---   - Step 4: ~10 seconds
+-- Estimated Runtime: 5-15 minutes (depending on model count)
 -- ============================================================================
+
+-- =============================================================================
+-- CONFIGURATION - UPDATE THESE VALUES FOR YOUR ENVIRONMENT
+-- =============================================================================
+-- Target database and schema for migration planning objects
+SET TARGET_DATABASE = 'MIGRATION_PLANNING';
+SET TARGET_SCHEMA = 'ANALYTICS';
+
+-- Warehouse for Cortex Agent execution (must exist in your account)
+SET AGENT_WAREHOUSE = 'COMPUTE_WH';
+
+-- Lookback window for usage analysis (default: 90 days)
+SET LOOKBACK_DAYS = 90;
 
 -- =============================================================================
 -- STEP 0: PRE-FLIGHT CHECKS
@@ -385,7 +397,7 @@ CREATE OR REPLACE AGENT SNOWFLAKE_INTELLIGENCE.AGENTS.MIGRATION_PLANNING_AGENT
         "semantic_view": "MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLANNING_SEM",
         "execution_environment": {
           "type": "warehouse",
-          "warehouse": "APP_WH"
+          "warehouse": "COMPUTE_WH"
         },
         "query_timeout": 60
       }

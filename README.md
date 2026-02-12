@@ -372,7 +372,23 @@ GRANT CREATE AGENT ON SCHEMA SNOWFLAKE_INTELLIGENCE.AGENTS TO ROLE <your_role>;
 
 ### 3.2 Deployment Steps
 
-#### Option 1: Snowflake CLI (Recommended)
+#### Step 1: Configure Your Environment
+
+Open `sql/deploy.sql` and update the configuration section at the top:
+
+```sql
+-- =============================================================================
+-- CONFIGURATION - UPDATE THESE VALUES FOR YOUR ENVIRONMENT
+-- =============================================================================
+SET TARGET_DATABASE = 'MIGRATION_PLANNING';   -- Change if needed
+SET TARGET_SCHEMA = 'ANALYTICS';              -- Change if needed
+SET AGENT_WAREHOUSE = 'COMPUTE_WH';           -- << YOUR WAREHOUSE NAME
+SET LOOKBACK_DAYS = 90;                       -- Adjust analysis window
+```
+
+#### Step 2: Run Deployment
+
+**Option A: Snowflake CLI (Recommended)**
 
 ```bash
 # Clone the repository
@@ -383,12 +399,13 @@ cd migration-prioritization-project
 snow sql -f sql/deploy.sql
 ```
 
-#### Option 2: Snowsight
+**Option B: Snowsight**
 
 1. Open Snowsight → **Worksheets**
 2. Create a new SQL worksheet
 3. Copy contents of `sql/deploy.sql`
-4. Execute all statements
+4. **Update the CONFIGURATION section** with your warehouse name
+5. Execute all statements
 
 ### 3.3 Deployment Output
 

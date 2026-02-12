@@ -1,6 +1,8 @@
 -- ============================================================================
 -- Filename: 04_cortex_agent.sql
 -- Description: Cortex Agent for Snowflake Intelligence
+-- 
+-- BEFORE RUNNING: Update the warehouse name on line 41 to match your environment
 -- ============================================================================
 
 -- Step 1: Ensure SNOWFLAKE_INTELLIGENCE database and schema exist
@@ -38,7 +40,7 @@ CREATE OR REPLACE AGENT SNOWFLAKE_INTELLIGENCE.AGENTS.MIGRATION_PLANNING_AGENT
         "semantic_view": "MIGRATION_PLANNING.ANALYTICS.MIGRATION_PLANNING_SEM",
         "execution_environment": {
           "type": "warehouse",
-          "warehouse": "APP_WH"
+          "warehouse": "COMPUTE_WH"
         },
         "query_timeout": 60
       }
