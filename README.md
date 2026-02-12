@@ -651,14 +651,10 @@ Snowflake Intelligence uses the user's **default role** and **default warehouse*
 
 ```
 migration-prioritization-project/
-├── README.md                                # This design document
+├── README.md                # This design document
 └── sql/
-    ├── deploy.sql                           # Master deployment script
-    ├── 01_model_usage_metrics.sql           # Step 1: Usage metrics table
-    ├── 02_cortex_migration_recommendations.sql  # Steps 2-3: AI scoring
-    ├── 03_semantic_view.sql                 # Step 4: Semantic view
-    ├── 04_cortex_agent.sql                  # Step 5: Cortex Agent
-    └── 03_sample_queries.sql                # Example analysis queries
+    ├── deploy.sql           # Complete deployment script (run this)
+    └── sample_queries.sql   # Example analysis queries (post-deployment)
 ```
 
 ---
